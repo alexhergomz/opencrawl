@@ -341,6 +341,65 @@ def get_warc_header(rec, name: str) -> Optional[str]:
 
 
 # -----------------------------
+# Multiprocessing helper (must be at module level for pickling)
+# -----------------------------
+
+
+def _process_warc_worker(args_tuple):
+    """Worker function for multiprocessing. Must be at module level."""
+    (
+        warc_path,
+        crawl,
+        out_dir_path,
+        bloom_capacity,
+        bloom_error_rate,
+        bloom_seed,
+        max_scan,
+        max_head,
+        max_pii_scan,
+        require_200,
+        require_html,
+        skip_noai,
+        strip_query,
+        accept_jsonld,
+    ) = args_tuple
+
+    # Re-create bloom filter for this process
+    cfg = BloomConfig(
+        capacity=bloom_capacity,
+        error_rate=bloom_error_rate,
+        seed=bloom_seed.encode("utf-8") if isinstance(bloom_seed, str) else bloom_seed,
+    )
+    bloom = BloomFilter(cfg)
+
+    # Create null logger (can't pickle real logger)
+    import logging
+
+    null_logger = logging.getLogger(f"worker")
+    null_logger.setLevel(logging.WARNING)
+
+    # Process the WARC
+    stats = process_warc_file(
+        crawl=crawl,
+        warc_path=warc_path,
+        out_dir=Path(out_dir_path),
+        bloom=bloom,
+        logger=null_logger,
+        max_scan=max_scan,
+        max_head=max_head,
+        max_pii_scan=max_pii_scan,
+        require_200=require_200,
+        require_html=require_html,
+        skip_noai=skip_noai,
+        strip_query=strip_query,
+        accept_jsonld=accept_jsonld,
+    )
+
+    # Return stats + bloom bits for merging
+    return stats, bytes(bloom.bits)
+
+
+# -----------------------------
 # Main runner: processes WARC files, with per-file commit for crash safety
 # -----------------------------
 
@@ -687,43 +746,32 @@ def run(args: argparse.Namespace) -> int:
                 len(pending_warcs),
             )
 
-            # Prepare args for each WARC
-            from functools import partial
-
-            def process_one_warc(warc_path):
-                # Each process gets its own bloom filter
-                cfg = BloomConfig(
-                    capacity=args.bloom_capacity,
-                    error_rate=args.bloom_error_rate,
-                    seed=args.bloom_seed.encode("utf-8"),
+            # Prepare args for each WARC (all picklable)
+            worker_args = [
+                (
+                    warc_path,
+                    args.crawl,
+                    str(out_dir),
+                    args.bloom_capacity,
+                    args.bloom_error_rate,
+                    args.bloom_seed,
+                    args.max_scan,
+                    args.max_head,
+                    args.max_pii_scan,
+                    args.require_200,
+                    args.require_html,
+                    args.skip_noai,
+                    args.strip_query,
+                    not args.reject_jsonld,
                 )
-                bloom = BloomFilter(cfg)
-                # Use a null logger (can't pickle real logger)
-                null_logger = logging.getLogger(f"worker.{hash(warc_path) % 1000}")
-                null_logger.setLevel(logging.WARNING)
-
-                stats = process_warc_file(
-                    crawl=args.crawl,
-                    warc_path=warc_path,
-                    out_dir=out_dir,
-                    bloom=bloom,
-                    logger=null_logger,
-                    max_scan=args.max_scan,
-                    max_head=args.max_head,
-                    max_pii_scan=args.max_pii_scan,
-                    require_200=args.require_200,
-                    require_html=args.require_html,
-                    skip_noai=args.skip_noai,
-                    strip_query=args.strip_query,
-                    accept_jsonld=not args.reject_jsonld,
-                )
-                # Return stats + bloom bits for merging
-                return stats, bytes(bloom.bits)
+                for warc_path in pending_warcs
+            ]
 
             # Process in parallel using processes
             with ProcessPoolExecutor(max_workers=args.workers) as executor:
                 futures = {
-                    executor.submit(process_one_warc, w): w for w in pending_warcs
+                    executor.submit(_process_warc_worker, args): args[0]
+                    for args in worker_args
                 }
                 for future in as_completed(futures):
                     try:
