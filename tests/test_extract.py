@@ -1,6 +1,6 @@
-"""Tests for cc_pointer_miner.extract"""
+"""Tests for opencrawl.extract"""
 import pytest
-from cc_pointer_miner.extract import (
+from opencrawl.extract import (
     canonicalize_url,
     fast_prefilter,
     extract_head,

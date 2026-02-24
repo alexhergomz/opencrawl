@@ -87,7 +87,11 @@ def canonicalize_url(url: str, strip_query: bool = False) -> str:
 def fast_prefilter(html: bytes, max_scan: int) -> bool:
     chunk = html[:max_scan]
     low = chunk.lower()
-    if CC_URL_RE.search(low):
+    # Fast string checks (much faster than regex)
+    if (
+        b"creativecommons.org/licenses/" in low
+        or b"creativecommons.org/publicdomain/" in low
+    ):
         return True
     # Strong hints
     if b"creativecommons" in low and b"license" in low:

@@ -1,8 +1,8 @@
-"""Tests for cc_pointer_miner.bloom"""
+"""Tests for opencrawl.bloom"""
 import tempfile
 from pathlib import Path
 import pytest
-from cc_pointer_miner.bloom import BloomConfig, BloomFilter
+from opencrawl.bloom import BloomConfig, BloomFilter
 
 
 def test_bloom_add_and_contains():

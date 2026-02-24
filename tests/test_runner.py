@@ -1,8 +1,8 @@
-"""Tests for cc_pointer_miner.runner"""
+"""Tests for opencrawl.runner"""
 import tempfile
 from pathlib import Path
 import pytest
-from cc_pointer_miner.runner import (
+from opencrawl.runner import (
     ShardSpec,
     load_json,
     atomic_write_text,
@@ -85,6 +85,6 @@ def test_run_empty_warc_list_completes():
             "--shard-id", "0", "--shard-count", "1",
             "--bloom-capacity", "1000",
         ])
-        from cc_pointer_miner.runner import run
+        from opencrawl.runner import run
         exit_code = run(args)
         assert exit_code == 0

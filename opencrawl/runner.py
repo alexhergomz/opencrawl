@@ -564,6 +564,112 @@ def run(args: argparse.Namespace) -> int:
 
     done_set = set(progress.get("done", {}).keys())
 
+    # Download all WARCs first if requested (huge speedup for sequential processing)
+    if args.download_first:
+        download_dir = work_dir / "downloads"
+        download_dir.mkdir(parents=True, exist_ok=True)
+
+        # Filter to pending WARCs
+        pending_warcs = [w for w in shard_paths if w not in done_set]
+
+        if pending_warcs:
+            # Check which ones are already downloaded
+            to_download = []
+            for w in pending_warcs:
+                local_path = download_dir / Path(w).name
+                if not local_path.exists():
+                    to_download.append(w)
+
+            if to_download:
+                logger.info(
+                    "Downloading %d WARC files to %s (parallel=%d)...",
+                    len(to_download),
+                    download_dir,
+                    args.download_workers,
+                )
+
+                def download_one(warc_url):
+                    local_path = download_dir / Path(warc_url).name
+                    if local_path.exists():
+                        return warc_url, str(local_path)
+                    try:
+                        sess = get_http_session()
+                        resp = sess.get(
+                            warc_url, stream=True, timeout=300, verify=_verify_ssl
+                        )
+                        resp.raise_for_status()
+                        with open(local_path, "wb") as f:
+                            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                                f.write(chunk)
+                        return warc_url, str(local_path)
+                    except Exception as e:
+                        logger.warning(f"Failed to download {warc_url}: {e}")
+                        return warc_url, warc_url  # Fall back to remote
+
+                # Download in parallel
+                with ThreadPoolExecutor(max_workers=args.download_workers) as executor:
+                    futures = {executor.submit(download_one, w): w for w in to_download}
+                    for future in as_completed(futures):
+                        warc_url, local_path = future.result()
+                        # Replace URL with local path
+                        for i, w in enumerate(shard_paths):
+                            if w == warc_url:
+                                shard_paths[i] = local_path
+                                break
+
+                logger.info("Download complete, processing locally...")
+
+    # Pre-decompress if requested
+    if args.pre_decompress and shard_paths:
+        decompress_dir = work_dir / "decompressed"
+        decompress_dir.mkdir(parents=True, exist_ok=True)
+
+        # Find WARCs that need decompression
+        to_decompress = []
+        for w in shard_paths:
+            if w.startswith("http"):
+                continue  # Skip remote URLs
+            uncompressed = decompress_dir / Path(w).stem
+            if not uncompressed.exists():
+                to_decompress.append(w)
+
+        if to_decompress:
+            import gzip
+            import shutil
+
+            logger.info(
+                "Decompressing %d WARC files to %s (parallel=%d)...",
+                len(to_decompress),
+                decompress_dir,
+                args.decompress_workers,
+            )
+
+            def decompress_one(warc_path):
+                uncompressed = decompress_dir / Path(warc_path).stem
+                if uncompressed.exists():
+                    return warc_path, str(uncompressed)
+                try:
+                    with gzip.open(warc_path, "rb") as f_in:
+                        with open(uncompressed, "wb") as f_out:
+                            shutil.copyfileobj(f_in, f_out)
+                    return warc_path, str(uncompressed)
+                except Exception as e:
+                    logger.warning(f"Failed to decompress {warc_path}: {e}")
+                    return warc_path, warc_path
+
+            with ThreadPoolExecutor(max_workers=args.decompress_workers) as executor:
+                futures = {executor.submit(decompress_one, w): w for w in to_decompress}
+                for future in as_completed(futures):
+                    warc_url, decompressed_path = future.result()
+                    for i, w in enumerate(shard_paths):
+                        if w == warc_url:
+                            shard_paths[i] = decompressed_path
+                            break
+
+            logger.info("Decompression complete, processing...")
+
+    # For download-first, we've now replaced URLs with local paths
+
     # Bloom filter (obligatory)
     bloom_path = state_dir / "seen_urls.bloom"
 
@@ -894,6 +1000,28 @@ def build_argparser() -> argparse.ArgumentParser:
         default=None,
         help="URL for shared bloom/progress sync (e.g., s3://bucket/path, https://server/). "
         "If set, workers sync bloom filter across machines.",
+    )
+    ap.add_argument(
+        "--download-first",
+        action="store_true",
+        help="Download all WARCs to local disk first, then process (much faster for sequential processing)",
+    )
+    ap.add_argument(
+        "--download-workers",
+        type=int,
+        default=4,
+        help="Number of parallel downloads when --download-first is used",
+    )
+    ap.add_argument(
+        "--pre-decompress",
+        action="store_true",
+        help="Decompress WARC files before processing (2-3x faster processing, requires 10x disk space)",
+    )
+    ap.add_argument(
+        "--decompress-workers",
+        type=int,
+        default=4,
+        help="Number of parallel decompression workers",
     )
 
     return ap

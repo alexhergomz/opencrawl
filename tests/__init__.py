@@ -1,1 +1,1 @@
-# Tests for cc_pointer_miner
+# Tests for opencrawl
