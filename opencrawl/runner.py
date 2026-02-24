@@ -5,7 +5,7 @@ import os
 import sys
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional, Tuple
@@ -677,59 +677,74 @@ def run(args: argparse.Namespace) -> int:
     all_stats = []
     final_bloom = None
 
+    # Use multiprocessing for true parallelism (avoids GIL)
     if args.workers > 1:
-        # Parallel processing: split WARCs into chunks for each worker
         pending_warcs = [w for w in shard_paths if w not in done_set]
         if pending_warcs:
-            # Split WARCs among workers
-            chunk_size = max(1, len(pending_warcs) // args.workers)
-            chunks = [
-                pending_warcs[i : i + chunk_size]
-                for i in range(0, len(pending_warcs), chunk_size)
-            ]
+            logger.info(
+                "Starting %d parallel workers for %d WARCs",
+                args.workers,
+                len(pending_warcs),
+            )
 
-            def process_chunk(warc_paths_chunk):
-                # Each worker gets its own bloom filter and logger
+            # Prepare args for each WARC
+            from functools import partial
+
+            def process_one_warc(warc_path):
+                # Each process gets its own bloom filter
                 cfg = BloomConfig(
                     capacity=args.bloom_capacity,
                     error_rate=args.bloom_error_rate,
                     seed=args.bloom_seed.encode("utf-8"),
                 )
-                chunk_bloom = BloomFilter(cfg)
-                chunk_logger = logging.getLogger(f"cc_pointer_miner.worker")
-                chunk_stats = []
+                bloom = BloomFilter(cfg)
+                # Use a null logger (can't pickle real logger)
+                null_logger = logging.getLogger(f"worker.{hash(warc_path) % 1000}")
+                null_logger.setLevel(logging.WARNING)
 
-                for warc_path in warc_paths_chunk:
-                    stats = process_warc_file(
-                        crawl=args.crawl,
-                        warc_path=warc_path,
-                        out_dir=out_dir,
-                        bloom=chunk_bloom,
-                        logger=chunk_logger,
-                        max_scan=args.max_scan,
-                        max_head=args.max_head,
-                        max_pii_scan=args.max_pii_scan,
-                        require_200=args.require_200,
-                        require_html=args.require_html,
-                        skip_noai=args.skip_noai,
-                        strip_query=args.strip_query,
-                        accept_jsonld=not args.reject_jsonld,
-                    )
-                    chunk_stats.append(stats)
-                return chunk_stats, chunk_bloom
+                stats = process_warc_file(
+                    crawl=args.crawl,
+                    warc_path=warc_path,
+                    out_dir=out_dir,
+                    bloom=bloom,
+                    logger=null_logger,
+                    max_scan=args.max_scan,
+                    max_head=args.max_head,
+                    max_pii_scan=args.max_pii_scan,
+                    require_200=args.require_200,
+                    require_html=args.require_html,
+                    skip_noai=args.skip_noai,
+                    strip_query=args.strip_query,
+                    accept_jsonld=not args.reject_jsonld,
+                )
+                # Return stats + bloom bits for merging
+                return stats, bytes(bloom.bits)
 
-            logger.info(
-                "Starting %d workers for %d WARCs", args.workers, len(pending_warcs)
-            )
-            with ThreadPoolExecutor(max_workers=args.workers) as executor:
-                futures = [executor.submit(process_chunk, chunk) for chunk in chunks]
+            # Process in parallel using processes
+            with ProcessPoolExecutor(max_workers=args.workers) as executor:
+                futures = {
+                    executor.submit(process_one_warc, w): w for w in pending_warcs
+                }
                 for future in as_completed(futures):
-                    chunk_stats, chunk_bloom = future.result()
-                    all_stats.extend(chunk_stats)
-                    if final_bloom is None:
-                        final_bloom = chunk_bloom
-                    else:
-                        final_bloom.merge(chunk_bloom)
+                    try:
+                        stats, bloom_bits = future.result()
+                        all_stats.append(stats)
+
+                        # Reconstruct bloom and merge
+                        cfg = BloomConfig(
+                            capacity=args.bloom_capacity,
+                            error_rate=args.bloom_error_rate,
+                            seed=args.bloom_seed.encode("utf-8"),
+                        )
+                        chunk_bloom = BloomFilter(cfg)
+                        chunk_bloom.bits[:] = bytearray(bloom_bits)
+
+                        if final_bloom is None:
+                            final_bloom = chunk_bloom
+                        else:
+                            final_bloom.merge(chunk_bloom)
+                    except Exception as e:
+                        logger.warning(f"Worker failed: {e}")
 
             # Update progress with all stats
             for stats in all_stats:
