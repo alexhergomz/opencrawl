@@ -308,8 +308,10 @@ class _HttpStreamWrapperFromResponse:
 
 def iter_response_records(warc_path: str, prefetched_response=None):
     stream = open_stream(warc_path, prefetched_response)
-    gz = GZipStream(stream)
-    it = ArchiveIterator(gz, record_types=WarcRecordType.response)
+    # Only use GZipStream for .gz files or HTTP streams
+    if warc_path.endswith(".gz"):
+        stream = GZipStream(stream)
+    it = ArchiveIterator(stream, record_types=WarcRecordType.response)
     for rec in it:
         yield rec
 
