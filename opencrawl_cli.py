@@ -28,7 +28,10 @@ BANNER = _make_banner()
 
 
 def run():
-    print(BANNER)
+    try:
+        print(BANNER)
+    except UnicodeEncodeError:
+        print("OpenCrawl - Creative Commons License Miner for Common Crawl")
     raise SystemExit(main())
 
 

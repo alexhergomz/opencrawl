@@ -27,6 +27,8 @@ cd opencrawl
 pip install -r requirements.txt
 ```
 
+**Note**: If you encounter a `UnicodeEncodeError` when running the CLI (e.g., in environments with ASCII-only terminal encoding), ensure your terminal supports UTF-8 or set `PYTHONIOENCODING=utf-8`.
+
 ## Quick Start
 
 1. Create a WARC list file:
